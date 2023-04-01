@@ -1,0 +1,11 @@
+[package]
+name = "game-2048"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "2048"
+path = "src/main.rs"
+
+[dependencies]
+nalgebra = "0.32.2"
