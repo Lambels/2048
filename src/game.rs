@@ -1,44 +1,71 @@
-use std::{io::Read, mem};
+use std::{io::Read, mem, ops::Index, usize};
+use core::{array, slice};
 
 use crate::parser::{Command, Parser, ParsingError};
 
-const EMPTY_BOX: u32 = 0;
+const EMPTY_BOX: usize = 0;
+const BOARD_SIZE: usize = 16;
+const BOARD_WIDTH: usize = 4;
 
-struct Columns<'a> {
-    inner: &'a mut [u32; 16],
+/// sdgfsg
+struct Columns {
+    dirty: [u32; BOARD_SIZE],
+    dirty_x: usize,
+    clean_x: usize,
     wrap: usize,
 }
 
-impl Columns<'_> {
-    fn new(inner: &mut [u32; 16], wrap: usize) -> Columns<'_> {
-        Columns { inner, wrap }
-    }
+enum WrapStep {
+    Stepped(usize),
+    Wrapped,
 }
 
-impl<'a> Iterator for Columns<'a> {
-    type Item = &'a mut u32;
+impl Columns {
+    fn new(dirty: [u32; BOARD_SIZE]) {
 
+    }
+
+    // dont return a wraps step because clean pointer will always be behind dirty pointer.
+    fn step_clean(&mut self) -> usize {
+        
+    }
+
+    fn step_dirty(&mut self) -> (WrapStep, WrapStep) {}
+}
+
+impl Iterator for Columns {
+    type Item = (usize, (u32, u32));
+
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        let step = self.step_clean();
+        let (dirty1, dirty2) = self.step_dirty();
+
+        match (dirty1, dirty2) {
+            (WrapStep::Wrapped, _) => Some(step, (EMPTY_BOX, EMPTY_BOX)),
+            (WrapStep::Stepped(x), WrapStep::Wrapped) => Some(step, (x/2, x/2)),
+            (WrapStep::Stepped(x), WrapStep::Stepped(y) => Some(step, (x, y)),
+        }
     }
 }
 
-impl<'a> DoubleEndedIterator for Columns<'a> {
+impl DoubleEndedIterator for Columns {
+    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        todo!()
+        self.0.next_back()
     }
 }
+
+struct Rows();
 
 #[derive(Default)]
-struct GameState([u32; 16]);
+struct GameState([u32; BOARD_SIZE]);
 
 impl GameState {
     fn shift(&mut self, direction: Command) -> u32 {
-        let stack_emitter: Box<dyn DoubleEndedIterator<Item = _>> = match direction {
-            Command::MoveUp | Command::MoveDown => Box::new(Columns::new(&mut self.0, 4)),
-            Command::MoveLeft | Command::MoveRight => {
-                Box::new(self.0.iter_mut())
-            }
+        let mut stack_emitter: Box<dyn DoubleEndedIterator<Item = _>> = match direction {
+            Command::MoveUp | Command::MoveDown => Box::new(Columns::new()),
+            Command::MoveLeft | Command::MoveRight => Box::new(Rows::new()),
             _ => unreachable!(),
         };
 
@@ -54,9 +81,18 @@ impl GameState {
         let mut total = 0;
         
         // set compare (ideal) reference to the top element of the stack.
-        let mut comp_ref: Option<&mut u32> = Some(stack_emitter.next().expect("The board must have 16 entries"));
+        let mut comp_ref = Some(stack_emitter.next().expect("The board must have 16 entries"));
         // free ref is reference to an element on the stack which is always free.
-        let mut free_ref: Option<&mut u32> = None;
+        let mut free_ref = None;
+        comp_ref = comp_ref.and_then(|v| {
+            if *v == EMPTY_BOX {
+                free_ref = Some(v);
+                None
+            } else {
+                Some(v)
+            }
+        });
+
         while let Some(current_ref) = stack_emitter.next() {
             count += 1;
             if count % 4 == 0 {
@@ -69,25 +105,34 @@ impl GameState {
                 continue;
             }
 
-            GameState::swap_with_fallback(current_ref, comp_ref, free_ref);
+            total += GameState::swap_with_fallback(current_ref, &mut comp_ref, &mut free_ref);
         }
         
         total
     }
 
-    fn swap_with_fallback(v: &mut u32, ideal: Option<&mut u32>, fallback: Option<&mut u32>) -> u32 {
-        if let Some(ideal) = ideal {
-            if *v == *ideal {
-                *ideal = *v * 2;
-                v
-            } else if let Some(fallback) = fallback {
-                            
-            } else {
-    
+    fn swap_with_fallback<'a>(v: &'a mut u32, ideal: &'a mut Option<&'a mut u32>, fallback: &'a mut Option<&'a mut u32>) -> u32 {
+        if let Some(ref mut ideal_ptr) = *ideal {
+            if *v == **ideal_ptr {
+                let new_val = *v * 2;
+                **ideal_ptr = new_val;
+                *v = EMPTY_BOX;
+                if fallback.is_none() {
+                    *fallback = Some(v);
+                }
+                return new_val / 2;
+            } else if let Some(ref mut fallback) = *fallback {
+                mem::swap(*fallback, v);
+                *ideal = Some(fallback);
+                return 0;
             }
-        } else if let Some(v) = fallback {
+        } else if let Some(ref mut fallback_ptr) = *fallback {
+            mem::swap(*fallback_ptr, v);
+            *ideal = fallback.take();
+            return 0;
+        }
 
-        }  
+        unreachable!()
     }
 
     #[inline]
@@ -119,6 +164,7 @@ impl<R> Game<R> {
     }
 }
 
+#[derive(Debug)]
 pub enum GameExit {
     ParseError(ParsingError),
     Quit,

@@ -2,13 +2,16 @@
 
 use std::io;
 
-use game::Game;
+use game::{Game, GameExit};
 use parser::Parser;
 
 mod game;
 mod parser;
 
-fn main() -> Result<(), parser::ParsingError> {
+fn main() -> Result<(), GameExit> {
     let parser = Parser::new(io::stdin());
-    Game::new(parser).game_loop()
+    Game::new(parser).game_loop().map(|v| {
+        println!("{v}");
+        ()
+    })
 }
