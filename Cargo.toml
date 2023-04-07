@@ -8,4 +8,3 @@ name = "2048"
 path = "src/main.rs"
 
 [dependencies]
-nalgebra = "0.32.2"
