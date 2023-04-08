@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, io::Read};
+use std::io::Read;
 
 use crate::parser::{Command, Parser, ParsingError};
 
@@ -38,6 +38,8 @@ trait SkipWrap: DoubleEndedIterator<Item = WrapStep<usize>> {
     }
 }
 
+impl<T> SkipWrap for T where T: DoubleEndedIterator<Item = WrapStep<usize>> {}
+
 /// WrapStep represents a step taken in an iterator which might have wrapped.
 #[derive(Debug, PartialEq, Eq)]
 enum WrapStep<T> {
@@ -45,6 +47,32 @@ enum WrapStep<T> {
     Stepped(T),
     /// Represents the first step which wrapped.
     Wrapped(T),
+}
+
+impl WrapStep<usize> {
+    fn index_into<'a, T>(&self, source: &'a [T]) -> WrapStep<&'a T> {
+        match self {
+            WrapStep::Stepped(index) => WrapStep::Stepped(&source[*index]), 
+            WrapStep::Wrapped(index) => WrapStep::Wrapped(&source[*index]),
+        }
+    }
+}
+
+impl<T: ToOwned> ToOwned for WrapStep<&T> {
+    type Owned = WrapStep<T>;
+
+    fn to_owned(&self) -> Self::Owned {
+        todo!()
+    }
+}
+
+impl<T> AsRef<T> for WrapStep<T> {
+    fn as_ref(&self) -> &T {
+        match self {
+            WrapStep::Stepped(v) => v,
+            WrapStep::Wrapped(v) => v,
+        }
+    }
 }
 
 /// *_pointer keeps row representation.
@@ -103,11 +131,21 @@ impl DoubleEndedIterator for ColumnWrap {
     }
 }
 
-struct RowWrap {}
+struct RowWrap {
+    front_pointer: usize,
+    back_pointer: usize,
+
+    wrap: usize,
+}
 
 impl RowWrap {
     fn new(size: usize, wrap: usize) -> Self {
-        todo!()
+        assert_eq!(size % wrap, 0);
+        Self {
+            front_pointer: 0,
+            back_pointer: size - 1,
+            wrap,
+        }
     }
 }
 
@@ -115,7 +153,20 @@ impl Iterator for RowWrap {
     type Item = WrapStep<usize>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
+        if self.front_pointer > self.back_pointer {
+            return None;
+        } else if self.front_pointer == 0 {
+            self.front_pointer += 1;
+            return Some(WrapStep::Stepped(0));
+        }
+
+        let edge = self.front_pointer % self.wrap;
+        self.front_pointer += 1;
+        if edge == 0 {
+            Some(WrapStep::Wrapped(self.front_pointer - 1))
+        } else {
+            Some(WrapStep::Stepped(self.front_pointer - 1))
+        }
     }
 }
 
@@ -125,12 +176,14 @@ impl DoubleEndedIterator for RowWrap {
     }
 }
 
+/// GameState is a state machine modeling the state of the game board of 2048.
 #[derive(Default, PartialEq, Eq)]
 struct GameState([u32; BOARD_SIZE]);
 
 impl GameState {
     fn shift(&mut self, direction: Command) -> u32 {
-        let (mut clean_iter, mut dirty_iter): (Box<WrapIter<_>>, Box<WrapIter<_>>) = match direction {
+        let (mut clean_iter, mut dirty_iter): (Box<WrapIter<_>>, Box<WrapIter<_>>) = match direction
+        {
             Command::MoveUp | Command::MoveDown => (
                 Box::new(ColumnWrap::new(BOARD_SIZE, BOARD_WIDTH)),
                 Box::new(ColumnWrap::new(BOARD_SIZE, BOARD_WIDTH)),
@@ -151,7 +204,22 @@ impl GameState {
             _ => {}
         }
 
-        todo!()
+        let previous_value = Some(self.0[*dirty_iter
+            .next()
+            .expect("expected at least one element (0)")
+            .as_ref()]);
+        let mut total = 0;
+        for index in clean_iter {
+            match previous_value {
+                Some(value) if value.as_ref() == EMPTY_BOX => {}
+                Some(value) => {
+                    let current_value = dirty_iter.wrap_skip_zero(&self.0, EMPTY_BOX);
+                }
+                None => {}
+            }
+        }
+
+        total
     }
 
     #[inline]
@@ -234,5 +302,21 @@ mod tests {
         assert_eq!(Some(WrapStep::Stepped(5)), column_iter.next());
         assert_eq!(Some(WrapStep::Stepped(8)), column_iter.next());
         assert_eq!(None, column_iter.next());
+    }
+
+    #[test]
+    fn row_wrap() {
+        let mut row_iter = RowWrap::new(9, 3);
+
+        assert_eq!(Some(WrapStep::Stepped(0)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(1)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(2)), row_iter.next());
+        assert_eq!(Some(WrapStep::Wrapped(3)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(4)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(5)), row_iter.next());
+        assert_eq!(Some(WrapStep::Wrapped(6)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(7)), row_iter.next());
+        assert_eq!(Some(WrapStep::Stepped(8)), row_iter.next());
+        assert_eq!(None, row_iter.next());
     }
 }
