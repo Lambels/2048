@@ -10,7 +10,7 @@ pub enum Command {
     Restart,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ParsingError {}
 
 pub struct Parser<R> {

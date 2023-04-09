@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{io::Read, slice::SliceIndex};
 
 use crate::parser::{Command, Parser, ParsingError};
 
@@ -16,32 +16,37 @@ type WrapIter<T> = dyn DoubleEndedIterator<Item = WrapStep<T>>;
 ///
 /// The purpose of this trait is to blanket the implementation for skipping the EMPTY_BOX value for
 /// the current column / row in an array provided the wrapping of the indexes.
-trait SkipWrap: DoubleEndedIterator<Item = WrapStep<usize>> {
+trait SkipWrap<I>: DoubleEndedIterator<Item = WrapStep<I>> {
     /// wrap_skip_zero will walk the underlaying interator until it wraps. Before wrapping, if it
     /// encounters any zero values it skips them, advancing the iterator and returns the first non
     /// zero value BEFORE WRAPPING. If no non zero value is found before wrapping, the first
     /// wrapped value will be returned.
-    fn wrap_skip_zero<T: Copy + PartialEq + Eq>(
+    fn wrap_skip_zero<'a, T>(
         &mut self,
-        source: &[T],
-        zero: T,
-    ) -> Option<WrapStep<T>> {
-        loop {
-            match self.next()? {
-                WrapStep::Stepped(index) if source[index] != zero => {
-                    return Some(WrapStep::Stepped(source[index]))
-                }
-                WrapStep::Stepped(_) => {}
-                WrapStep::Wrapped(index) => return Some(WrapStep::Wrapped(source[index])),
+        source: &'a [T],
+        zero: &T,
+    ) -> Option<WrapStep<&'a <I as SliceIndex<[T]>>::Output>>
+    where
+        I: SliceIndex<[T]> + Clone,
+        <I as SliceIndex<[T]>>::Output: PartialEq<T> + Eq,
+    {
+        for index in self {
+            let value = index.index_into(source);
+            match value {
+                WrapStep::Stepped(value) if value == zero => {}
+                WrapStep::Stepped(value) => return Some(WrapStep::Stepped(value)),
+                WrapStep::Wrapped(value) => return Some(WrapStep::Wrapped(value)),
             }
         }
+
+        None
     }
 }
 
-impl<T> SkipWrap for T where T: DoubleEndedIterator<Item = WrapStep<usize>> {}
+impl<I, T> SkipWrap<I> for T where T: DoubleEndedIterator<Item = WrapStep<I>> {}
 
 /// WrapStep represents a step taken in an iterator which might have wrapped.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WrapStep<T> {
     /// Represents a step taken by the iterator which hasnt yet wrapped.
     Stepped(T),
@@ -49,24 +54,32 @@ enum WrapStep<T> {
     Wrapped(T),
 }
 
-impl WrapStep<usize> {
-    fn index_into<'a, T>(&self, source: &'a [T]) -> WrapStep<&'a T> {
+impl<I: Clone> WrapStep<I> {
+    /// index_into turns a WrapStep which can index into a slice to a WrapStep corresponding to the
+    /// Index opperation.
+    fn index_into<'a, T>(&self, source: &'a [T]) -> WrapStep<&'a I::Output>
+    where
+        I: SliceIndex<[T]>,
+    {
         match self {
-            WrapStep::Stepped(index) => WrapStep::Stepped(&source[*index]), 
-            WrapStep::Wrapped(index) => WrapStep::Wrapped(&source[*index]),
+            WrapStep::Stepped(index) => WrapStep::Stepped(&source[index.clone()]),
+            WrapStep::Wrapped(index) => WrapStep::Wrapped(&source[index.clone()]),
         }
     }
 }
 
-impl<T: ToOwned> ToOwned for WrapStep<&T> {
-    type Owned = WrapStep<T>;
-
-    fn to_owned(&self) -> Self::Owned {
-        todo!()
+impl<T: Clone> WrapStep<&T> {
+    // cloned maps a WrapStep<&T> to a WrapStep<T> by cloning the T.
+    fn cloned(&self) -> WrapStep<T> {
+        match self {
+            WrapStep::Stepped(value) => WrapStep::Stepped(T::clone(value)),
+            WrapStep::Wrapped(value) => WrapStep::Wrapped(T::clone(value)),
+        }
     }
 }
 
 impl<T> AsRef<T> for WrapStep<T> {
+    // as_ref unwraps the &WrapStep<T> wrapper to reveal the &T.
     fn as_ref(&self) -> &T {
         match self {
             WrapStep::Stepped(v) => v,
@@ -75,6 +88,9 @@ impl<T> AsRef<T> for WrapStep<T> {
     }
 }
 
+/// ColumnWrap is an iterator which yields indexes pointing in a row majour matrix. The indexes are
+/// wrapped in the WrapStep enum indicating when the iterator wraps.
+///
 /// *_pointer keeps row representation.
 /// *_index keeps col representation.
 struct ColumnWrap {
@@ -88,6 +104,10 @@ struct ColumnWrap {
 }
 
 impl ColumnWrap {
+    /// new creates a new column iterator. wrap describes the width of each column.
+    ///
+    /// # Panics:
+    /// new panics if size % wrap != 0
     fn new(size: usize, wrap: usize) -> Self {
         assert_eq!(size % wrap, 0);
         Self {
@@ -103,6 +123,9 @@ impl ColumnWrap {
 impl Iterator for ColumnWrap {
     type Item = WrapStep<usize>;
 
+    /// next yields the next index into row majour matrix.
+    /// next returns None when the iterator finished all the possible indexes or intersects with
+    /// indexes yielded by the next_back method.
     fn next(&mut self) -> Option<Self::Item> {
         if self.front_pointer > self.back_pointer {
             return None;
@@ -181,6 +204,10 @@ impl DoubleEndedIterator for RowWrap {
 struct GameState([u32; BOARD_SIZE]);
 
 impl GameState {
+    /// shift applies a Command wise shift. It returns the points gained after the move.
+    ///
+    /// # Panics:
+    /// shift expects only Move* enum variants to be passed in.
     fn shift(&mut self, direction: Command) -> u32 {
         let (mut clean_iter, mut dirty_iter): (Box<WrapIter<_>>, Box<WrapIter<_>>) = match direction
         {
@@ -204,16 +231,19 @@ impl GameState {
             _ => {}
         }
 
-        let previous_value = Some(self.0[*dirty_iter
-            .next()
-            .expect("expected at least one element (0)")
-            .as_ref()]);
+        let previous_value = Some(
+            dirty_iter
+                .next()
+                .expect("expected at least one element")
+                .index_into(&self.0)
+                .cloned(),
+        );
         let mut total = 0;
         for index in clean_iter {
             match previous_value {
-                Some(value) if value.as_ref() == EMPTY_BOX => {}
+                Some(value) if *value.as_ref() == EMPTY_BOX => {}
                 Some(value) => {
-                    let current_value = dirty_iter.wrap_skip_zero(&self.0, EMPTY_BOX);
+                    let current_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
                 }
                 None => {}
             }
@@ -222,18 +252,26 @@ impl GameState {
         total
     }
 
+    /// reset resets the board state.
     #[inline]
     fn reset(&mut self) {
         self.0.fill(EMPTY_BOX);
     }
 
-    fn over(&self) -> bool {
+    /// is_over indicates wether there are any moves left to play.
+    fn is_over(&self) -> bool {
         todo!()
     }
 
+    /// populate pseudo randomly adds a 2 or 4 box inside the game state at a random, valid location.
+    ///
+    /// 90% - 2
+    /// 10% - 4
     fn populate(&mut self) {}
 }
 
+/// Game represents all the global state the 2048 game should hold and IO capabilities by wrapping
+/// the Parser type.
 pub struct Game<R> {
     parser: Parser<R>,
     game: GameState,
@@ -250,9 +288,13 @@ impl<R> Game<R> {
     }
 }
 
+/// GameExit represents any possible errors from the states of the game, either from the IO:
+/// ParseError or the game itself: Quit ... .
 #[derive(Debug)]
 pub enum GameExit {
+    /// ParseError represents any error from the parsing in the game loop.
     ParseError(ParsingError),
+    /// Quit represents an exit signal from the user.
     Quit,
 }
 
@@ -263,9 +305,19 @@ impl From<ParsingError> for GameExit {
 }
 
 impl<R: Read> Game<R> {
+    /// game_loop starts the game loop for the game, this is the main entry point in the game. It
+    /// handles IO by wrapping the command parser and outputing the games state. It also handles
+    /// the actuall game by aplying the correct combination of moves and exiting when there are no
+    /// more moves left.
+    /// 
+    /// Ok(u32) represents that the game ended (no more moves where left) and returns the score the
+    /// user accumulated during the game loop.
+    ///
+    /// Err(GameExit) represents an error which happened throughout the game_loop, either from the
+    /// game itself or the IO process.
     pub fn game_loop(mut self) -> Result<u32, GameExit> {
         loop {
-            if self.game.over() {
+            if self.game.is_over() {
                 return Ok(self.score);
             }
             self.game.populate();
@@ -278,7 +330,10 @@ impl<R: Read> Game<R> {
                 | Command::MoveDown) => {
                     self.score += self.game.shift(x);
                 }
-                Command::Restart => self.game.reset(),
+                Command::Restart => {
+                    self.game.reset();
+                    self.score = 0;
+                }
             };
         }
     }
