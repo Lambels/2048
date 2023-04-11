@@ -1,4 +1,4 @@
-use std::{io::Read, slice::SliceIndex};
+use std::{io::Read, slice::SliceIndex, fmt::Display};
 
 use crate::parser::{Command, Parser, ParsingError};
 
@@ -52,6 +52,15 @@ enum WrapStep<T> {
     Stepped(T),
     /// Represents the first step which wrapped.
     Wrapped(T),
+}
+
+impl<T> WrapStep<T> {
+    fn is_wrapped(&self) -> bool {
+        match self {
+            WrapStep::Wrapped(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl<I: Clone> WrapStep<I> {
@@ -203,6 +212,12 @@ impl DoubleEndedIterator for RowWrap {
 #[derive(Default, PartialEq, Eq)]
 struct GameState([u32; BOARD_SIZE]);
 
+impl Display for GameState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
+}
+
 impl GameState {
     /// shift applies a Command wise shift. It returns the points gained after the move.
     ///
@@ -231,25 +246,93 @@ impl GameState {
             _ => {}
         }
 
-        let previous_value = Some(
+        let mut previous_value = Some(
             dirty_iter
-                .next()
-                .expect("expected at least one element")
-                .index_into(&self.0)
+                .wrap_skip_zero(&self.0, &EMPTY_BOX)
+                .expect("expected some value")
                 .cloned(),
         );
         let mut total = 0;
         for index in clean_iter {
             match previous_value {
-                Some(value) if *value.as_ref() == EMPTY_BOX => {}
-                Some(value) => {
-                    let current_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
+                Some(WrapStep::Stepped(value)) => {
+                    // we need to get a new value to compare to the previous.
+                    // if we get a match we replace with their sum, else just replace with the
+                    // previous value and set the new value to the previous value.
+
+                    let next_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
+                    let (new_value, sum) = self.compare_and_swap(
+                        *index.as_ref(),
+                        value,
+                        next_value.map(|v| v.cloned()),
+                    );
+                    previous_value = new_value;
+                    total += sum;
                 }
-                None => {}
+                Some(WrapStep::Wrapped(value)) => {
+                    // we need to nullate the current wrap or do a swap.
+                    // value will always point infront of the current index, so we nullate untill
+                    // we get a synchronisation needed for the compare_and_swap opperation.
+
+                    match index {
+                        WrapStep::Stepped(index) => self.0[index] = EMPTY_BOX,
+                        WrapStep::Wrapped(index) => {
+                            // we are sync ed.
+
+                            let next_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
+                            let (new_value, sum) =
+                                self.compare_and_swap(index, value, next_value.map(|v| v.cloned()));
+                            previous_value = new_value;
+                            total += sum;
+                        }
+                    }
+                }
+                None => {
+                    // we either need to get 2 new items or nullate the current position.
+
+                    let current_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
+                    let next_value = match current_value {
+                        None => {
+                            self.0[*index.as_ref()] = EMPTY_BOX;
+                            continue;
+                        }
+                        Some(value) if value.is_wrapped() => {
+                            previous_value = current_value.map(|v| v.cloned());
+                            continue;
+                        }
+                        Some(_) => dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX),
+                    };
+
+                    let (new_value, sum) = self.compare_and_swap(
+                        *index.as_ref(),
+                        **current_value.unwrap().as_ref(),
+                        next_value.map(|v| v.cloned()),
+                    );
+                    previous_value = new_value;
+                    total += sum;
+                }
             }
         }
 
         total
+    }
+
+    fn compare_and_swap(
+        &mut self,
+        index: usize,
+        primary: u32,
+        secondary: Option<WrapStep<u32>>,
+    ) -> (Option<WrapStep<u32>>, u32) {
+        match secondary {
+            Some(WrapStep::Stepped(value)) if value == primary => {
+                self.0[index] = value * 2;
+                (None, value)
+            }
+            _ => {
+                self.0[index] = primary;
+                (secondary, 0)
+            }
+        }
     }
 
     /// reset resets the board state.
@@ -309,7 +392,7 @@ impl<R: Read> Game<R> {
     /// handles IO by wrapping the command parser and outputing the games state. It also handles
     /// the actuall game by aplying the correct combination of moves and exiting when there are no
     /// more moves left.
-    /// 
+    ///
     /// Ok(u32) represents that the game ended (no more moves where left) and returns the score the
     /// user accumulated during the game loop.
     ///
@@ -373,5 +456,13 @@ mod tests {
         assert_eq!(Some(WrapStep::Stepped(7)), row_iter.next());
         assert_eq!(Some(WrapStep::Stepped(8)), row_iter.next());
         assert_eq!(None, row_iter.next());
+    }
+
+    #[test]
+    fn shift_up() {
+        let mut state = GameState([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
+
+        state.shift(Command::MoveUp);
+        println!()
     }
 }
