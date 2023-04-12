@@ -1,4 +1,8 @@
-use std::{io::Read, slice::SliceIndex, fmt::Display};
+use std::{
+    fmt::{Debug, Display, Write},
+    io::Read,
+    slice::SliceIndex,
+};
 
 use crate::parser::{Command, Parser, ParsingError};
 
@@ -212,9 +216,36 @@ impl DoubleEndedIterator for RowWrap {
 #[derive(Default, PartialEq, Eq)]
 struct GameState([u32; BOARD_SIZE]);
 
-impl Display for GameState {
+impl Debug for GameState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        let max_value = self
+            .0
+            .iter()
+            .copied()
+            .max()
+            .expect("expected at least one value");
+
+        // | 2    |
+        // | 2048 |
+
+        let digits = f32::floor(f32::log10(max_value as f32)) as usize + 1;
+
+        let mut write_row = |row: &[u32]| -> std::fmt::Result {
+            let mut iter = row.into_iter();
+            let value = iter.next().unwrap();
+            write!(f, "| {value:^digits$}")?;
+
+            for value in iter {
+                write!(f, " | {value:^digits$}")?;
+            }
+            write!(f, " |\n")
+        };
+
+        for row in self.0.chunks(4) {
+            write_row(row)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -461,8 +492,9 @@ mod tests {
     #[test]
     fn shift_up() {
         let mut state = GameState([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
+        println!("{state:?}");
 
         state.shift(Command::MoveUp);
-        println!()
+        println!("{state:?}");
     }
 }
