@@ -241,7 +241,7 @@ impl Debug for GameState {
             write!(f, " |\n")
         };
 
-        for row in self.0.chunks(4) {
+        for row in self.0.chunks(BOARD_WIDTH) {
             write_row(row)?;
         }
 
@@ -312,7 +312,7 @@ impl GameState {
 
                             if value == EMPTY_BOX {
                                 value = match dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX) {
-                                    None => 0,
+                                    None => EMPTY_BOX,
                                     Some(WrapStep::Wrapped(value)) => {
                                         previous_value = Some(WrapStep::Wrapped(*value));
                                         continue;
