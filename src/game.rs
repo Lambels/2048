@@ -287,6 +287,7 @@ impl GameState {
         for index in clean_iter {
             match previous_value {
                 Some(WrapStep::Stepped(value)) => {
+                    println!("PREV V STEPPED");
                     // we need to get a new value to compare to the previous.
                     // if we get a match we replace with their sum, else just replace with the
                     // previous value and set the new value to the previous value.
@@ -301,6 +302,7 @@ impl GameState {
                     total += sum;
                 }
                 Some(WrapStep::Wrapped(value)) => {
+                    println!("PREV V WRAPPED");
                     // we need to nullate the current wrap or do a swap.
                     // value will always point infront of the current index, so we nullate untill
                     // we get a synchronisation needed for the compare_and_swap opperation.
@@ -319,16 +321,18 @@ impl GameState {
                     }
                 }
                 None => {
+                    println!("NONE");
                     // we either need to get 2 new items or nullate the current position.
 
-                    let current_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX);
+                    let current_value = dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX).map(|v| v.cloned());
                     let next_value = match current_value {
                         None => {
                             self.0[*index.as_ref()] = EMPTY_BOX;
                             continue;
                         }
                         Some(value) if value.is_wrapped() => {
-                            previous_value = current_value.map(|v| v.cloned());
+                            self.0[*index.as_ref()] = EMPTY_BOX;
+                            previous_value = current_value;
                             continue;
                         }
                         Some(_) => dirty_iter.wrap_skip_zero(&self.0, &EMPTY_BOX),
@@ -336,7 +340,7 @@ impl GameState {
 
                     let (new_value, sum) = self.compare_and_swap(
                         *index.as_ref(),
-                        **current_value.unwrap().as_ref(),
+                        *current_value.unwrap().as_ref(),
                         next_value.map(|v| v.cloned()),
                     );
                     previous_value = new_value;
@@ -494,7 +498,8 @@ mod tests {
         let mut state = GameState([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
         println!("{state:?}");
 
-        state.shift(Command::MoveUp);
+        let score = state.shift(Command::MoveUp);
+        assert_eq!(score, 16);
         println!("{state:?}");
     }
-}
+} // FIRST 500 LINES OF RUST! 
