@@ -1,10 +1,11 @@
 use std::{
-    fmt::{Debug, Display, Write},
-    io::Read,
+    fmt::{Debug, Display},
     slice::SliceIndex,
 };
 
-use crate::parser::{Command, Parser, ParsingError};
+use colored::{Color, ColoredString, Colorize};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use rand::Rng;
 
 /// The empty value of a box in the 2048 game data model.
 const EMPTY_BOX: u32 = 0;
@@ -12,6 +13,8 @@ const EMPTY_BOX: u32 = 0;
 const BOARD_SIZE: usize = 16;
 /// The standard board width.
 const BOARD_WIDTH: usize = 4;
+
+const CLEAR_BOARD: &'static str = "\x1B[2J\x1B[1;1H";
 
 type WrapIter<T> = dyn DoubleEndedIterator<Item = WrapStep<T>>;
 
@@ -112,8 +115,10 @@ struct ColumnWrap {
 
     back_pointer: usize,
     prev_back_index: usize,
+    curr_back_head: usize,
 
     wrap: usize,
+    size: usize,
 }
 
 impl ColumnWrap {
@@ -126,9 +131,11 @@ impl ColumnWrap {
         Self {
             front_pointer: 0,
             prev_front_index: 0,
-            back_pointer: size - 1,
+            back_pointer: size,
             prev_back_index: size - 1,
+            curr_back_head: size - 1,
             wrap,
+            size,
         }
     }
 }
@@ -140,7 +147,7 @@ impl Iterator for ColumnWrap {
     /// next returns None when the iterator finished all the possible indexes or intersects with
     /// indexes yielded by the next_back method.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front_pointer > self.back_pointer {
+        if self.front_pointer >= self.back_pointer {
             return None;
         } else if self.front_pointer == 0 {
             self.front_pointer += 1;
@@ -163,7 +170,25 @@ impl Iterator for ColumnWrap {
 
 impl DoubleEndedIterator for ColumnWrap {
     fn next_back(&mut self) -> Option<Self::Item> {
-        todo!()
+        if self.back_pointer <= self.front_pointer {
+            return None;
+        } else if self.back_pointer == self.size {
+            self.back_pointer -= 1;
+            return Some(WrapStep::Stepped(self.back_pointer));
+        }
+
+        let edge = self.back_pointer % self.wrap;
+        self.back_pointer -= 1;
+        if edge == 0 {
+            // we wrapped, decrement the current head.
+            self.curr_back_head -= 1;
+            self.prev_back_index = self.curr_back_head;
+            Some(WrapStep::Wrapped(self.curr_back_head))
+        } else {
+            // we didnt wrap.
+            self.prev_back_index -= self.wrap;
+            Some(WrapStep::Stepped(self.prev_back_index))
+        }
     }
 }
 
@@ -172,6 +197,7 @@ struct RowWrap {
     back_pointer: usize,
 
     wrap: usize,
+    size: usize,
 }
 
 impl RowWrap {
@@ -179,8 +205,9 @@ impl RowWrap {
         assert_eq!(size % wrap, 0);
         Self {
             front_pointer: 0,
-            back_pointer: size - 1,
+            back_pointer: size,
             wrap,
+            size,
         }
     }
 }
@@ -189,7 +216,7 @@ impl Iterator for RowWrap {
     type Item = WrapStep<usize>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.front_pointer > self.back_pointer {
+        if self.front_pointer >= self.back_pointer {
             return None;
         } else if self.front_pointer == 0 {
             self.front_pointer += 1;
@@ -208,7 +235,20 @@ impl Iterator for RowWrap {
 
 impl DoubleEndedIterator for RowWrap {
     fn next_back(&mut self) -> Option<Self::Item> {
-        todo!()
+        if self.back_pointer <= self.front_pointer {
+            return None;
+        } else if self.back_pointer == self.size {
+            self.back_pointer -= 1;
+            return Some(WrapStep::Stepped(self.back_pointer));
+        }
+
+        let edge = self.back_pointer % self.wrap;
+        self.back_pointer -= 1;
+        if edge == 0 {
+            Some(WrapStep::Wrapped(self.back_pointer))
+        } else {
+            Some(WrapStep::Stepped(self.back_pointer))
+        }
     }
 }
 
@@ -218,17 +258,7 @@ struct GameState([u32; BOARD_SIZE]);
 
 impl Debug for GameState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let max_value = self
-            .0
-            .iter()
-            .copied()
-            .max()
-            .expect("expected at least one value");
-
-        // | 2    |
-        // | 2048 |
-
-        let digits = f32::floor(f32::log10(max_value as f32)) as usize + 1;
+        let digits = self.get_max_digits();
 
         let mut write_row = |row: &[u32]| -> std::fmt::Result {
             let mut iter = row.into_iter();
@@ -238,7 +268,7 @@ impl Debug for GameState {
             for value in iter {
                 write!(f, " | {value:^digits$}")?;
             }
-            write!(f, " |\n")
+            write!(f, " |\n\r")
         };
 
         for row in self.0.chunks(BOARD_WIDTH) {
@@ -249,19 +279,95 @@ impl Debug for GameState {
     }
 }
 
+impl Display for GameState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn render_row(
+            f: &mut std::fmt::Formatter<'_>,
+            row: &[ColoredString],
+            padding: usize,
+        ) -> std::fmt::Result {
+            let mut iter = row.into_iter();
+
+            if let Some(value) = iter.next() {
+                write!(f, "| {value:^padding$}")?;
+
+                for value in iter {
+                    write!(f, " | {value:^padding$}")?;
+                }
+
+                write!(f, " |")?;
+            }
+
+            Ok(())
+        }
+
+        fn map_to_color(value: u32) -> ColoredString {
+            if value == EMPTY_BOX {
+                return ColoredString::default();
+            }
+
+            let color = match value {
+                x if x == 2 => Color::Green,
+                x if x == 4 => Color::BrightGreen,
+                x if x == 8 => Color::BrightCyan,
+                x if x == 16 => Color::Cyan,
+                x if x == 32 => Color::BrightBlue,
+                x if x == 64 => Color::Blue,
+                x if x == 128 => Color::BrightMagenta,
+                x if x == 256 => Color::Magenta,
+                x if x == 512 => Color::Yellow,
+                x if x == 1024 => Color::BrightYellow,
+                x if x == 2048 => Color::BrightRed,
+                _ => unreachable!(),
+            };
+
+            value.to_string().color(color)
+        }
+
+        let digits = self.get_max_digits();
+        let binding = self.0.map(map_to_color);
+        let iterator = binding.chunks(BOARD_WIDTH);
+        let bottom_border = "-".repeat(BOARD_WIDTH * (digits + BOARD_WIDTH) - 3);
+        let top_border = "_".repeat(BOARD_WIDTH * (digits + BOARD_WIDTH) - 3);
+
+        write!(f, "{top_border}\n\r")?;
+        for row in iterator {
+            render_row(f, row, digits)?;
+            write!(f, "\n\r")?;
+        }
+        write!(f, "{bottom_border}\n\r")?;
+
+        Ok(())
+    }
+}
+
 impl GameState {
+    fn get_max_digits(&self) -> usize {
+        let max_value = self
+            .0
+            .iter()
+            .copied()
+            .max()
+            .expect("expected at least one value");
+
+        // | 2    |
+        // | 2048 |
+
+        f32::floor(f32::log10(max_value as f32)) as usize + 1
+    }
+
     /// shift applies a Command wise shift. It returns the points gained after the move.
     ///
     /// # Panics:
     /// shift expects only Move* enum variants to be passed in.
-    fn shift(&mut self, direction: Command) -> u32 {
+    fn shift(&mut self, direction: KeyCode) -> u32 {
         let (mut clean_iter, mut dirty_iter): (Box<WrapIter<_>>, Box<WrapIter<_>>) = match direction
         {
-            Command::MoveUp | Command::MoveDown => (
+            KeyCode::Up | KeyCode::Down => (
                 Box::new(ColumnWrap::new(BOARD_SIZE, BOARD_WIDTH)),
                 Box::new(ColumnWrap::new(BOARD_SIZE, BOARD_WIDTH)),
             ),
-            Command::MoveLeft | Command::MoveRight => (
+            KeyCode::Left | KeyCode::Right => (
                 Box::new(RowWrap::new(BOARD_SIZE, BOARD_WIDTH)),
                 Box::new(RowWrap::new(BOARD_SIZE, BOARD_WIDTH)),
             ),
@@ -270,7 +376,7 @@ impl GameState {
 
         // apply mask for inverted iterators.
         match direction {
-            Command::MoveLeft | Command::MoveDown => {
+            KeyCode::Right | KeyCode::Down => {
                 clean_iter = Box::new(clean_iter.rev());
                 dirty_iter = Box::new(dirty_iter.rev());
             }
@@ -388,28 +494,36 @@ impl GameState {
 
     /// is_over indicates wether there are any moves left to play.
     fn is_over(&self) -> bool {
-        todo!()
+        false
     }
 
     /// populate pseudo randomly adds a 2 or 4 box inside the game state at a random, valid location.
     ///
     /// 90% - 2
     /// 10% - 4
-    fn populate(&mut self) {}
+    fn populate(&mut self) {
+        let mut rng_core = rand::thread_rng();
+        let mut possible_values = self.0.iter_mut().filter(|&&mut v| v == EMPTY_BOX).collect::<Vec<_>>();
+        let index = rng_core.gen_range(0..possible_values.len());
+
+        if rng_core.gen_bool(0.9) {
+            *possible_values[index] = 2;
+        } else {
+            *possible_values[index] = 4;
+        }     
+    }
 }
 
 /// Game represents all the global state the 2048 game should hold and IO capabilities by wrapping
 /// the Parser type.
-pub struct Game<R> {
-    parser: Parser<R>,
+pub struct Game {
     game: GameState,
     score: u32,
 }
 
-impl<R> Game<R> {
-    pub fn new(parser: Parser<R>) -> Game<R> {
+impl Game {
+    pub fn new() -> Game {
         Game {
-            parser,
             game: GameState::default(),
             score: 0,
         }
@@ -421,18 +535,18 @@ impl<R> Game<R> {
 #[derive(Debug)]
 pub enum GameExit {
     /// ParseError represents any error from the parsing in the game loop.
-    ParseError(ParsingError),
+    IOError(std::io::Error),
     /// Quit represents an exit signal from the user.
     Quit,
 }
 
-impl From<ParsingError> for GameExit {
-    fn from(value: ParsingError) -> Self {
-        GameExit::ParseError(value)
+impl From<std::io::Error> for GameExit {
+    fn from(value: std::io::Error) -> Self {
+        GameExit::IOError(value)
     }
 }
 
-impl<R: Read> Game<R> {
+impl Game {
     /// game_loop starts the game loop for the game, this is the main entry point in the game. It
     /// handles IO by wrapping the command parser and outputing the games state. It also handles
     /// the actuall game by aplying the correct combination of moves and exiting when there are no
@@ -445,24 +559,35 @@ impl<R: Read> Game<R> {
     /// game itself or the IO process.
     pub fn game_loop(mut self) -> Result<u32, GameExit> {
         loop {
+            print!("{}", CLEAR_BOARD);
             if self.game.is_over() {
                 return Ok(self.score);
             }
             self.game.populate();
+            print!("{}\n\r", self.game);
 
-            match self.parser.parse_command()? {
-                Command::Quit => return Err(GameExit::Quit),
-                x @ (Command::MoveLeft
-                | Command::MoveRight
-                | Command::MoveUp
-                | Command::MoveDown) => {
-                    self.score += self.game.shift(x);
+            loop {
+                if let Event::Key(key_pressed) = event::read()? {
+                    match key_pressed {
+                        KeyEvent {
+                            code:
+                                value @ (KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right),
+                            ..
+                        } => self.score += self.game.shift(value),
+                        KeyEvent {
+                            code: KeyCode::Char('q'),
+                            ..
+                        } => return Err(GameExit::Quit),
+                        KeyEvent {
+                            code: KeyCode::Char('r'),
+                            ..
+                        } => self.game.reset(),
+                        _ => continue,
+                    }
+
+                    break;
                 }
-                Command::Restart => {
-                    self.game.reset();
-                    self.score = 0;
-                }
-            };
+            }
         }
     }
 }
@@ -488,6 +613,25 @@ mod tests {
     }
 
     #[test]
+    fn column_wrap_rev() {
+        let mut column_iter = ColumnWrap::new(9, 3);
+
+        assert_eq!(Some(WrapStep::Stepped(8)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(5)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(2)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Wrapped(7)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(4)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(1)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Wrapped(6)), column_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(3)), column_iter.next_back());
+        println!("Good till here");
+        assert_eq!(Some(WrapStep::Stepped(0)), column_iter.next_back());
+        println!("GOOOD");
+        assert_eq!(None, column_iter.next_back());
+        println!("WTF");
+    }
+
+    #[test]
     fn row_wrap() {
         let mut row_iter = RowWrap::new(9, 3);
 
@@ -504,11 +648,27 @@ mod tests {
     }
 
     #[test]
+    fn row_wrap_rev() {
+        let mut row_iter = RowWrap::new(9, 3);
+
+        assert_eq!(Some(WrapStep::Stepped(8)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(7)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(6)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Wrapped(5)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(4)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(3)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Wrapped(2)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(1)), row_iter.next_back());
+        assert_eq!(Some(WrapStep::Stepped(0)), row_iter.next_back());
+        assert_eq!(None, row_iter.next());
+    }
+
+    #[test]
     fn shift_up() {
         let mut state = GameState([2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
         println!("{state:?}");
 
-        let score = state.shift(Command::MoveUp);
+        let score = state.shift(KeyCode::Up);
         assert_eq!(score, 16);
         println!("{state:?}");
     }
@@ -518,7 +678,7 @@ mod tests {
         let mut state = GameState([2, 0, 0, 2, 0, 0, 4, 4, 2, 2, 2, 4, 2, 2, 2, 2]);
         println!("{state:?}");
 
-        let score = state.shift(Command::MoveUp);
+        let score = state.shift(KeyCode::Up);
         println!("{state:?}");
     }
 
@@ -527,7 +687,7 @@ mod tests {
         let mut state = GameState([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
         println!("{state:?}");
 
-        let score = state.shift(Command::MoveUp);
+        let score = state.shift(KeyCode::Up);
         assert_eq!(score, 0);
         println!("{state:?}");
     }
@@ -537,8 +697,19 @@ mod tests {
         let mut state = GameState([0, 4, 2, 0, 4, 2, 8, 8, 8, 8, 8, 4, 2, 8, 2, 0]);
         println!("{state:?}");
 
-        let score = state.shift(Command::MoveUp);
+        let score = state.shift(KeyCode::Up);
         assert_eq!(score, 16);
         println!("{state:?}");
+    }
+
+    #[test]
+    fn display_board() {
+        let mut state = GameState([
+            0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 0, 0, 0, 0,
+        ]);
+
+        println!("{state}");
+        state.shift(KeyCode::Left);
+        println!("{state}");
     }
 } // FIRST 500 LINES OF RUST!
